@@ -39,3 +39,10 @@ void spectator_next_view();
 // Player colour utilities shared by view modules.
 COLORREF get_player_color(int player_idx);  // player_idx 1-8 (0 = gaia/black)
 HBRUSH   get_player_brush(int player_idx);
+
+// Nearest-palette-index lookup for the active draw_system palette, cached.
+// Use for TDrawArea__FillRect calls inside the Lock pass.
+unsigned __int8 pal_index(COLORREF rgb);
+
+// Returns the cached palette index for a player colour id (0..8).
+unsigned __int8 pal_player(int color_id);

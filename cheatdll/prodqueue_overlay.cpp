@@ -4,46 +4,21 @@
 #include "consts.h"
 #include "rec.h"
 
-// ---------------------------------------------------------------------------
-// Layout constants
-// ---------------------------------------------------------------------------
 static const int ICON_SIZE     = 36;
 static const int COUNT_H       = 14;
 static const int BAR_H         = 5;
 static const int CELL_W        = ICON_SIZE + 2;
 static const int MARGIN_R      = 8;
-static const int ROW_H         = ICON_SIZE + COUNT_H + BAR_H;  // 55 px
+static const int ROW_H         = ICON_SIZE + COUNT_H + BAR_H;
 static const int ROW_GAP       = 2;
-static const int TECH_ROW_Y    = ROW_H + ROW_GAP;              // 57 px
-static const int PANEL_H       = TECH_ROW_Y + ROW_H + 2;       // 114 px
+static const int TECH_ROW_Y    = ROW_H + ROW_GAP;
+static const int PANEL_H       = TECH_ROW_Y + ROW_H + 2;
 
-// Compact icon size (24px) row height: used by the spectator queue view
 static const int ICON_SIZE_C   = 24;
 static const int COUNT_H_C     = 10;
 static const int BAR_H_C       = 3;
-static const int ROW_H_COMPACT = ICON_SIZE_C + COUNT_H_C + BAR_H_C;  // 37 px
+static const int ROW_H_COMPACT = ICON_SIZE_C + COUNT_H_C + BAR_H_C;
 
-static HBRUSH s_br_bg       = NULL;
-static HBRUSH s_br_bar_bg   = NULL;
-static HBRUSH s_br_bar_fg   = NULL;
-static HBRUSH s_br_bar_tech = NULL;
-static HBRUSH s_br_icon     = NULL;
-
-static void ensure_brushes()
-{
-    if (!s_br_bg)
-    {
-        s_br_bg       = CreateSolidBrush(RGB(  0,   0,   0));
-        s_br_bar_bg   = CreateSolidBrush(RGB( 40,  40,  40));
-        s_br_bar_fg   = CreateSolidBrush(RGB( 30, 160,  60));
-        s_br_bar_tech = CreateSolidBrush(RGB( 60, 120, 220));
-        s_br_icon     = CreateSolidBrush(RGB( 60,  60,  80));
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SLP resolution helpers
-// ---------------------------------------------------------------------------
 static TShape* resolve_unit_slp(TRIBE_Player* player)
 {
     if (!iconsUnitPtr) return NULL;
@@ -72,15 +47,10 @@ static TShape* resolve_tech_slp(TRIBE_Player* player)
     return (slp && slp->Is_Loaded && slp->Num_Shapes > 0) ? slp : NULL;
 }
 
-// ---------------------------------------------------------------------------
-// collect_prodqueue_for_player
-// ---------------------------------------------------------------------------
 bool collect_prodqueue_for_player(TRIBE_Player* player, std::vector<PQEntry>& entries)
 {
     entries.clear();
     if (!player || !player->objects) return false;
-
-    std::map<__int16, int> id_to_idx;
 
     for (int i = 0; i < player->objects->Number_of_objects; i++)
     {
@@ -106,19 +76,22 @@ bool collect_prodqueue_for_player(TRIBE_Player* player, std::vector<PQEntry>& en
             __int16 slot_prg = (training && j == 0 && rec.master_id == active_id)
                                ? active_prg : 0;
 
-            auto it = id_to_idx.find(rec.master_id);
-            if (it == id_to_idx.end())
+            // Linear scan beats std::map here: N is small (<~20 distinct master_ids).
+            int idx = -1;
+            for (int k = 0; k < (int)entries.size(); k++)
+                if (entries[k].master_id == rec.master_id) { idx = k; break; }
+
+            if (idx < 0)
             {
                 PQEntry e;
                 e.master_id    = rec.master_id;
                 e.total_count  = rec.unit_count;
                 e.max_progress = slot_prg;
-                id_to_idx[rec.master_id] = (int)entries.size();
                 entries.push_back(e);
             }
             else
             {
-                PQEntry& e = entries[it->second];
+                PQEntry& e = entries[idx];
                 e.total_count += rec.unit_count;
                 if (slot_prg > e.max_progress) e.max_progress = slot_prg;
             }
@@ -127,9 +100,6 @@ bool collect_prodqueue_for_player(TRIBE_Player* player, std::vector<PQEntry>& en
     return !entries.empty();
 }
 
-// ---------------------------------------------------------------------------
-// collect_techqueue_for_player
-// ---------------------------------------------------------------------------
 bool collect_techqueue_for_player(TRIBE_Player* player, std::vector<TechEntry>& entries)
 {
     entries.clear();
@@ -158,9 +128,6 @@ bool collect_techqueue_for_player(TRIBE_Player* player, std::vector<TechEntry>& 
     return !entries.empty();
 }
 
-// ---------------------------------------------------------------------------
-// Convenience wrappers (local / currently-observed player)
-// ---------------------------------------------------------------------------
 bool collect_prodqueue(std::vector<PQEntry>& entries)
 {
     entries.clear();
@@ -175,8 +142,8 @@ bool collect_techqueue(std::vector<TechEntry>& entries)
     return collect_techqueue_for_player((TRIBE_Player*)RGE_Base_Game__get_player(*base_game), entries);
 }
 
-// SLP sprites render at native ~36px regardless of icon_size, so the cell
-// step must be at least 36+4 to prevent bleed.
+// SLP sprites render at native ~36px regardless of icon_size; cell step
+// must clear 36+4 to prevent neighbouring cells bleeding into the sprite.
 static inline int pq_count_h(int icon_size) { return (icon_size <= 24) ? 10 : COUNT_H; }
 static inline int pq_bar_h  (int icon_size) { return (icon_size <= 24) ?  3 : BAR_H;   }
 static inline int pq_cell_step(int icon_size) { return max(icon_size, 36) + 4; }
@@ -201,54 +168,53 @@ void draw_prodqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
     if (pass == SP_PASS_SLP)
     {
         TShape* unit_slp = resolve_unit_slp(player);
-        if (!unit_slp) return;
+        unsigned __int8 pi_bg     = pal_index(RGB(  0,   0,   0));
+        unsigned __int8 pi_bar_bg = pal_index(RGB( 40,  40,  40));
+        unsigned __int8 pi_bar_fg = pal_index(RGB( 30, 160,  60));
+        unsigned __int8 pi_icon   = pal_index(RGB( 60,  60,  80));
+
         for (int i = 0; i < n; i++)
         {
-            RGE_Master_Static_Object* mo = player->master_objects[entries[i].master_id];
-            if (!mo) continue;
-            __int16 frame = mo->button_pict;
-            if (frame < 0 || frame >= unit_slp->Num_Shapes) continue;
-            TShape__shape_draw(unit_slp, da,
-                origin_x + i * cell_w_i,
-                row_y, frame, NULL);
+            const PQEntry& e = entries[i];
+            int cx = origin_x + i * cell_w_i;
+
+            if (!unit_slp)
+                TDrawArea__FillRect(da, cx, row_y, cx + icon_size, row_y + icon_size, pi_icon);
+
+            int cy = row_y + icon_size;
+            TDrawArea__FillRect(da, cx, cy, cx + icon_size, cy + count_h_i, pi_bg);
+            int by = cy + count_h_i;
+            TDrawArea__FillRect(da, cx, by, cx + icon_size, by + bar_h_i, pi_bar_bg);
+            if (e.max_progress > 0 && e.max_progress <= 100)
+            {
+                int fw = (icon_size * e.max_progress) / 100;
+                if (fw > 0) TDrawArea__FillRect(da, cx, by, cx + fw, by + bar_h_i, pi_bar_fg);
+            }
+
+            if (unit_slp)
+            {
+                RGE_Master_Static_Object* mo = player->master_objects[entries[i].master_id];
+                if (!mo) continue;
+                __int16 frame = mo->button_pict;
+                if (frame < 0 || frame >= unit_slp->Num_Shapes) continue;
+                TShape__shape_draw(unit_slp, da, cx, row_y, frame, NULL);
+            }
         }
         return;
     }
 
-    // SP_PASS_GDI
-    ensure_brushes();
     HDC hdc = da->DrawDc;
     if (!hdc) return;
-    bool has_slp = resolve_unit_slp(player) != NULL;
-    SelectClipRgn(hdc, clip_region);
-
+    SetTextColor(hdc, RGB(255, 220, 50));
     for (int i = 0; i < n; i++)
     {
         const PQEntry& e = entries[i];
         int cx = origin_x + i * cell_w_i;
-
-        if (!has_slp)
-        {
-            RECT ricon = { cx, row_y, cx + icon_size, row_y + icon_size };
-            FillRect(hdc, &ricon, s_br_icon);
-        }
-
         int cy = row_y + icon_size;
         RECT rcount = { cx, cy, cx + icon_size, cy + count_h_i };
-        FillRect(hdc, &rcount, s_br_bg);
-        SetTextColor(hdc, RGB(255, 220, 50));
         char buf[12];
         snprintf(buf, sizeof(buf), "x%d", e.total_count);
         DrawTextA(hdc, buf, -1, &rcount, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-        int by = cy + count_h_i;
-        RECT rbar = { cx, by, cx + icon_size, by + bar_h_i };
-        FillRect(hdc, &rbar, s_br_bar_bg);
-        if (e.max_progress > 0 && e.max_progress <= 100)
-        {
-            int fw = (icon_size * e.max_progress) / 100;
-            if (fw > 0) { RECT rf = { cx, by, cx + fw, by + bar_h_i }; FillRect(hdc, &rf, s_br_bar_fg); }
-        }
     }
 }
 
@@ -272,56 +238,55 @@ void draw_techqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
     if (pass == SP_PASS_SLP)
     {
         TShape* tech_slp = resolve_tech_slp(player);
-        if (!tech_slp) return;
+        unsigned __int8 pi_bg     = pal_index(RGB(  0,   0,   0));
+        unsigned __int8 pi_bar_bg = pal_index(RGB( 40,  40,  40));
+        unsigned __int8 pi_bar_fg = pal_index(RGB( 60, 120, 220));
+        unsigned __int8 pi_icon   = pal_index(RGB( 60,  60,  80));
+
         for (int i = 0; i < n; i++)
         {
-            __int16 frame = entries[i].icon;
-            if (frame < 0 || frame >= tech_slp->Num_Shapes) continue;
-            TShape__shape_draw(tech_slp, da,
-                origin_x + i * cell_w_i,
-                row_y, frame, NULL);
+            const TechEntry& e = entries[i];
+            int cx = origin_x + i * cell_w_i;
+
+            if (!tech_slp)
+                TDrawArea__FillRect(da, cx, row_y, cx + icon_size, row_y + icon_size, pi_icon);
+
+            int ly = row_y + icon_size;
+            TDrawArea__FillRect(da, cx, ly, cx + icon_size, ly + count_h_i, pi_bg);
+            int by = ly + count_h_i;
+            TDrawArea__FillRect(da, cx, by, cx + icon_size, by + bar_h_i, pi_bar_bg);
+            if (e.progress > 0)
+            {
+                int fw = (icon_size * e.progress) / 100;
+                if (fw > 0) TDrawArea__FillRect(da, cx, by, cx + fw, by + bar_h_i, pi_bar_fg);
+            }
+
+            if (tech_slp)
+            {
+                __int16 frame = e.icon;
+                if (frame < 0 || frame >= tech_slp->Num_Shapes) continue;
+                TShape__shape_draw(tech_slp, da, cx, row_y, frame, NULL);
+            }
         }
         return;
     }
 
-    // SP_PASS_GDI
-    ensure_brushes();
     HDC hdc = da->DrawDc;
     if (!hdc) return;
-    bool has_slp = resolve_tech_slp(player) != NULL;
-    SelectClipRgn(hdc, clip_region);
-
+    SetTextColor(hdc, RGB(140, 200, 255));
     for (int i = 0; i < n; i++)
     {
         const TechEntry& e = entries[i];
         int cx = origin_x + i * cell_w_i;
-
-        if (!has_slp)
-        {
-            RECT ricon = { cx, row_y, cx + icon_size, row_y + icon_size };
-            FillRect(hdc, &ricon, s_br_icon);
-        }
-
         int ly = row_y + icon_size;
         RECT rl = { cx, ly, cx + icon_size, ly + count_h_i };
-        FillRect(hdc, &rl, s_br_bg);
-        SetTextColor(hdc, RGB(140, 200, 255));
         char buf[8];
         snprintf(buf, sizeof(buf), "%d%%", (int)e.progress);
         DrawTextA(hdc, buf, -1, &rl, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-        int by = ly + count_h_i;
-        RECT rbar = { cx, by, cx + icon_size, by + bar_h_i };
-        FillRect(hdc, &rbar, s_br_bar_bg);
-        if (e.progress > 0)
-        {
-            int fw = (icon_size * e.progress) / 100;
-            if (fw > 0) { RECT rf = { cx, by, cx + fw, by + bar_h_i }; FillRect(hdc, &rf, s_br_bar_tech); }
-        }
     }
 }
 
-// Single-cell wrappers for the live overlay; spectator path uses _pass.
+// Single-cell wrappers for the live overlay; spectator path calls _pass directly.
 void draw_prodqueue_overlay(TDrawArea* da, int cell_x, int cell_w,
                              const std::vector<PQEntry>& entries,
                              HRGN clip_region, TRIBE_Player* player, int row_y,
@@ -344,13 +309,15 @@ void draw_prodqueue_overlay(TDrawArea* da, int cell_x, int cell_w,
 
     if (TDrawArea__GetDc(da, "pq_unit"))
     {
-        ensure_brushes();
-        SetBkMode(da->DrawDc, TRANSPARENT);
-        HGDIOBJ old_font = SelectObject(da->DrawDc, GetStockObject(DEFAULT_GUI_FONT));
+        HDC hdc = da->DrawDc;
+        SetBkMode(hdc, TRANSPARENT);
+        SelectClipRgn(hdc, clip_region);
+        RGE_Font* gf = RGE_Base_Game__get_font(*base_game, 26);
+        HGDIOBJ old_font = SelectObject(hdc, gf ? gf->font : GetStockObject(DEFAULT_GUI_FONT));
         draw_prodqueue_overlay_pass(da, cell_x, cell_w, entries, clip_region,
                                     player, row_y, icon_size, right_align, SP_PASS_GDI);
-        SelectObject(da->DrawDc, old_font);
-        SelectClipRgn(da->DrawDc, 0);
+        SelectObject(hdc, old_font);
+        SelectClipRgn(hdc, 0);
         TDrawArea__ReleaseDc(da, "pq_unit");
     }
 
@@ -379,13 +346,15 @@ void draw_techqueue_overlay(TDrawArea* da, int cell_x, int cell_w,
 
     if (TDrawArea__GetDc(da, "pq_tech"))
     {
-        ensure_brushes();
-        SetBkMode(da->DrawDc, TRANSPARENT);
-        HGDIOBJ old_font = SelectObject(da->DrawDc, GetStockObject(DEFAULT_GUI_FONT));
+        HDC hdc = da->DrawDc;
+        SetBkMode(hdc, TRANSPARENT);
+        SelectClipRgn(hdc, clip_region);
+        RGE_Font* gf = RGE_Base_Game__get_font(*base_game, 26);
+        HGDIOBJ old_font = SelectObject(hdc, gf ? gf->font : GetStockObject(DEFAULT_GUI_FONT));
         draw_techqueue_overlay_pass(da, cell_x, cell_w, entries, clip_region,
                                     player, row_y, icon_size, right_align, SP_PASS_GDI);
-        SelectObject(da->DrawDc, old_font);
-        SelectClipRgn(da->DrawDc, 0);
+        SelectObject(hdc, old_font);
+        SelectClipRgn(hdc, 0);
         TDrawArea__ReleaseDc(da, "pq_tech");
     }
 
@@ -393,8 +362,7 @@ void draw_techqueue_overlay(TDrawArea* da, int cell_x, int cell_w,
 }
 
 // ===========================================================================
-// Normal (single-player) overlay
-// Shows the local / currently-observed player's queue during live games only.
+// Live overlay — shows the local player's queue during non-spectator games.
 // ===========================================================================
 
 struct PQUserData { bool had_queue; };
@@ -490,10 +458,9 @@ void register_prodqueue_overlay()
 }
 
 // ===========================================================================
-// Queue spectator view
-// Registered into the spectator container via register_queue_spectator_view().
-// The container handles the player grid, name header, and colour stripe.
-// This view renders the unit row and tech row into its allocated content area.
+// Queue spectator view — registered into the spectator container.
+// Container draws the player grid, name header, and colour stripe; this
+// view fills the per-player content area with the unit + tech rows.
 // ===========================================================================
 
 static bool queue_need_redraw()

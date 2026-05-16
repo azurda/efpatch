@@ -2,33 +2,23 @@
 #include "resources_overlay.h"
 #include "spectator_overlay.h"
 
-// ---------------------------------------------------------------------------
-// Attribute indices
-// ---------------------------------------------------------------------------
 static const int ATTR_FOOD     = 0;
 static const int ATTR_CARBON   = 1;
 static const int ATTR_ORE      = 2;
 static const int ATTR_NOVA     = 3;
 static const int ATTR_POP_ROOM = 4;   // free pop slots (cap - current)
-static const int ATTR_CIV_POP  = 11;  // civilian unit pop count
-static const int ATTR_MIL_POP  = 12;  // military unit pop count
+static const int ATTR_CIV_POP  = 11;  // civilian pop count
+static const int ATTR_MIL_POP  = 12;  // military pop count
 
-// ---------------------------------------------------------------------------
-// Card layout – mirrors unit-icon card style
-// ---------------------------------------------------------------------------
-static const int CARD_W      = 40;   // card width (wide enough for "999/200")
-static const int CARD_ICN_H  = 24;   // coloured icon area height
-static const int CARD_VAL_H  = 10;   // value text strip below icon
-static const int CARD_TOTAL  = CARD_ICN_H + CARD_VAL_H;   // 34 px
-static const int N_CARDS     = 5;    // Food, Carbon, Ore, Nova, Pop
+static const int CARD_W      = 40;   // wide enough for "999/200"
+static const int CARD_ICN_H  = 24;
+static const int CARD_VAL_H  = 10;
+static const int CARD_TOTAL  = CARD_ICN_H + CARD_VAL_H;
+static const int N_CARDS     = 5;
 
-// Keep compact_h in sync with the queue view (37 px) so switching views
-// doesn't cause a panel resize.
+// Match the queue view's compact_h so switching views doesn't resize the panel.
 static const int ROW_H_RES   = 37;
 
-// ---------------------------------------------------------------------------
-// Per-resource descriptors
-// ---------------------------------------------------------------------------
 struct ResInfo { const char* letter; COLORREF color; int attr; };
 
 static const ResInfo RES[4] = {
@@ -39,61 +29,40 @@ static const ResInfo RES[4] = {
 };
 static const COLORREF POP_COLOR = RGB(255, 215, 80);
 
-// ---------------------------------------------------------------------------
-// Cached brushes
-// ---------------------------------------------------------------------------
-static HBRUSH s_br_icon_bg[N_CARDS] = {};  // dark tinted bg per resource
-static HBRUSH s_br_card_dark        = NULL;
-static HBRUSH s_br_val_bg           = NULL;
-
-static void ensure_res_brushes()
+static void draw_res_card_fills(TDrawArea* da, int cx, int cy,
+                                 unsigned __int8 pi_dark,
+                                 unsigned __int8 pi_tint,
+                                 unsigned __int8 pi_val)
 {
-    if (s_br_card_dark) return;
-    s_br_card_dark = CreateSolidBrush(RGB(15, 15, 15));
-    s_br_val_bg    = CreateSolidBrush(RGB( 0,  0,  0));
-    for (int i = 0; i < 4; i++)
-    {
-        COLORREF c = RES[i].color;
-        // Dim tint of the resource colour for the card interior
-        s_br_icon_bg[i] = CreateSolidBrush(
-            RGB(GetRValue(c) / 6, GetGValue(c) / 6, GetBValue(c) / 6));
-    }
-    s_br_icon_bg[4] = CreateSolidBrush(
-        RGB(GetRValue(POP_COLOR) / 6, GetGValue(POP_COLOR) / 6, GetBValue(POP_COLOR) / 6));
+    TDrawArea__FillRect(da, cx,     cy,     cx + CARD_W, cy + CARD_ICN_H, pi_dark);
+    TDrawArea__FillRect(da, cx + 1, cy + 1, cx + CARD_W - 1, cy + CARD_ICN_H - 1, pi_tint);
+    TDrawArea__FillRect(da, cx,     cy + CARD_ICN_H,
+                            cx + CARD_W, cy + CARD_ICN_H + CARD_VAL_H, pi_val);
 }
 
-// ---------------------------------------------------------------------------
-// Draw one card at (cx, cy)
-// ---------------------------------------------------------------------------
-static void draw_res_card(HDC hdc, int cx, int cy,
-                          HBRUSH tint_brush, COLORREF text_color,
-                          const char* letter, const char* value)
+static void draw_res_card_text(HDC hdc, int cx, int cy,
+                                COLORREF text_color,
+                                const char* letter, const char* value)
 {
-    // Dark outer border / background
     RECT rcard = { cx, cy, cx + CARD_W, cy + CARD_ICN_H };
-    FillRect(hdc, &rcard, s_br_card_dark);
-
-    // Coloured tint fill (1px inset)
-    RECT rinner = { cx + 1, cy + 1, cx + CARD_W - 1, cy + CARD_ICN_H - 1 };
-    FillRect(hdc, &rinner, tint_brush);
-
-    // Letter centred in icon area
     SetTextColor(hdc, text_color);
     DrawTextA(hdc, letter, -1, &rcard, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // Value strip below
     RECT rval = { cx, cy + CARD_ICN_H, cx + CARD_W, cy + CARD_ICN_H + CARD_VAL_H };
-    FillRect(hdc, &rval, s_br_val_bg);
-    SetTextColor(hdc, text_color);
     DrawTextA(hdc, value, -1, &rval, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
-// ---------------------------------------------------------------------------
-// View callbacks
-// ---------------------------------------------------------------------------
 static bool res_need_redraw()
 {
     return true;  // resources change every tick; container gates on isRec()
+}
+
+// Dim tint of the resource colour for the card interior.
+static unsigned __int8 res_tint_pal(int card_idx)
+{
+    COLORREF base = (card_idx < 4) ? RES[card_idx].color : POP_COLOR;
+    COLORREF dim  = RGB(GetRValue(base) / 6, GetGValue(base) / 6, GetBValue(base) / 6);
+    return pal_index(dim);
 }
 
 static void res_render(TDrawArea* da, HRGN /*clip*/,
@@ -101,19 +70,24 @@ static void res_render(TDrawArea* da, HRGN /*clip*/,
                        int x, int y, int w,
                        SpectatorLayout /*layout*/, SpectatorPass pass)
 {
-    if (pass != SP_PASS_GDI) return;
     if (!player || !player->attributes) return;
+
+    int strip_w = N_CARDS * CARD_W;
+    int cx_base = x + w - strip_w;
+    if (cx_base < x) cx_base = x;
+
+    if (pass == SP_PASS_SLP)
+    {
+        unsigned __int8 pi_dark = pal_index(RGB(15, 15, 15));
+        unsigned __int8 pi_val  = pal_index(RGB( 0,  0,  0));
+        for (int i = 0; i < N_CARDS; i++)
+            draw_res_card_fills(da, cx_base + i * CARD_W, y, pi_dark, res_tint_pal(i), pi_val);
+        return;
+    }
+
     HDC hdc = da->DrawDc;
     if (!hdc) return;
 
-    ensure_res_brushes();
-
-    // Right-align all N_CARDS cards within [x, x+w]
-    int strip_w = N_CARDS * CARD_W;
-    int cx      = x + w - strip_w;
-    if (cx < x) cx = x;
-
-    // 4 resource cards
     for (int i = 0; i < 4; i++)
     {
         int val = (int)player->attributes[RES[i].attr];
@@ -123,30 +97,20 @@ static void res_render(TDrawArea* da, HRGN /*clip*/,
         else
             snprintf(buf, sizeof(buf), "%d", val);
 
-        draw_res_card(hdc, cx + i * CARD_W, y,
-                      s_br_icon_bg[i], RES[i].color,
-                      RES[i].letter, buf);
+        draw_res_card_text(hdc, cx_base + i * CARD_W, y, RES[i].color, RES[i].letter, buf);
     }
 
-    // Population card
-    {
-        int pop_cur = (int)(player->attributes[ATTR_CIV_POP] + player->attributes[ATTR_MIL_POP]);
-        int pop_cap = (int)(pop_cur + player->attributes[ATTR_POP_ROOM]);
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d/%d", pop_cur, pop_cap);
-        draw_res_card(hdc, cx + 4 * CARD_W, y,
-                      s_br_icon_bg[4], POP_COLOR,
-                      "P", buf);
-    }
+    int pop_cur = (int)(player->attributes[ATTR_CIV_POP] + player->attributes[ATTR_MIL_POP]);
+    int pop_cap = (int)(pop_cur + player->attributes[ATTR_POP_ROOM]);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d/%d", pop_cur, pop_cap);
+    draw_res_card_text(hdc, cx_base + 4 * CARD_W, y, POP_COLOR, "P", buf);
 }
 
-// ---------------------------------------------------------------------------
-// View registration
-// ---------------------------------------------------------------------------
 static const SpectatorViewDef s_res_view_def = {
     "Resources",
     ROW_H_RES,
-    ROW_H_RES,        // matches queue view's compact_h so no resize on tab switch
+    ROW_H_RES,
     res_render,
     res_need_redraw,
     NULL

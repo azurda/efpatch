@@ -5,17 +5,25 @@
 #include "log.h"
 #include <vector>
 
-// Font 26 is the HUD font, cycled through the largeText override in textrender.cpp.
-static const int SP_FONT_ID = 26;
+static const int SP_FONT_ID = 22;
 
-static const int STRIPE_W     = 4;
-static const int SP_CELL_GAP  = 3;
-static const int TAB_H        = 18;
-static const int SP_MAX_COL_W = 280;
+static const int STRIPE_W    = 4;
+static const int SP_CELL_GAP = 3;
+static const int TAB_H       = 18;
+static const int SP_TAB_W    = 120;
 
-static int label_h() { return cd.largeText ? 20 : 16; }
+// Floor sized to fit the resources view strip (~316 px) + player stripe.
+static const int SP_MIN_COL_W = 330;
+static int sp_col_w(int panel_w) {
+    int w = (panel_w * 30) / 100;
+    if (w < SP_MIN_COL_W) w = SP_MIN_COL_W;
+    if (w > panel_w)      w = panel_w;
+    return w;
+}
 
-// Indexed by color_table->vfptr->get_id() (1..8). Slot 0 = gaia.
+static int label_h() { return cd.largeText ? 22 : 16; }
+
+// SWGB lobby colour order, slots 1..8. Slot 0 = gaia / fallback.
 static const COLORREF PLAYER_COLORS[] =
 {
     RGB(  0,   0,   0),
@@ -24,11 +32,10 @@ static const COLORREF PLAYER_COLORS[] =
     RGB(  0, 204,   0),
     RGB(255, 255,   0),
     RGB(  0, 220, 220),
-    RGB(220, 120,   0),
-    RGB(180,   0, 220),
+    RGB(220,   0, 200),
     RGB(160, 160, 160),
+    RGB(220, 120,   0),
 };
-static HBRUSH s_br_player[9] = {};
 
 static const COLORREF TAB_VIEW_BG[] = {
     RGB( 30,  55, 110),
@@ -37,30 +44,23 @@ static const COLORREF TAB_VIEW_BG[] = {
     RGB(100,  60,  10),
 };
 
-// Slot index doesn't match the visible colour in MP with shuffled colours.
+// color_table->get_id() returns 0..7 (the actual shown colour even with
+// shuffled lobby picks). PLAYER_COLORS is 1-based
 static int player_color_id(TRIBE_Player* player, int fallback_idx)
 {
     if (player && player->color_table && player->color_table->vfptr
         && player->color_table->vfptr->get_id)
     {
         int id = player->color_table->vfptr->get_id(player->color_table);
-        if (id >= 0 && id <= 8) return id;
+        if (id >= 0 && id <= 7) return id + 1;
     }
-    return (fallback_idx >= 0 && fallback_idx <= 8) ? fallback_idx : 0;
+    return (fallback_idx >= 1 && fallback_idx <= 8) ? fallback_idx : 0;
 }
 
-COLORREF get_player_color(int idx)
+static COLORREF get_player_color(int idx)
 {
     if (idx < 0 || idx > 8) idx = 0;
     return PLAYER_COLORS[idx];
-}
-
-HBRUSH get_player_brush(int idx)
-{
-    if (idx < 0 || idx > 8) idx = 0;
-    if (!s_br_player[idx])
-        s_br_player[idx] = CreateSolidBrush(PLAYER_COLORS[idx]);
-    return s_br_player[idx];
 }
 
 struct PalCacheEntry { COLORREF rgb; unsigned __int8 idx; };
@@ -91,20 +91,48 @@ unsigned __int8 pal_index(COLORREF rgb)
     return e.idx;
 }
 
-unsigned __int8 pal_player(int color_id)
+static unsigned __int8 pal_player(int color_id)
 {
     if (color_id < 0 || color_id > 8) color_id = 0;
     return pal_index(PLAYER_COLORS[color_id]);
 }
 
+// Non-AA clone of the engine font: GDI's AA glyph cache can stall for ms
+// when evicted; bitmap glyphs are consistent.
+static HFONT s_noaa_font = NULL;
+static HFONT s_noaa_src  = NULL;
+static int   s_noaa_h    = 0;
+
 static HFONT sp_font()
 {
-    RGE_Font* f = RGE_Base_Game__get_font(*base_game, SP_FONT_ID);
-    return f ? f->font : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    RGE_Font* gf = RGE_Base_Game__get_font(*base_game, SP_FONT_ID);
+    HFONT src = gf ? gf->font : NULL;
+    if (!src) return (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+    // Rebuild if engine swapped the underlying font (e.g. cd.largeText toggle).
+    if (src != s_noaa_src && s_noaa_font)
+    {
+        DeleteObject(s_noaa_font);
+        s_noaa_font = NULL;
+    }
+    if (!s_noaa_font)
+    {
+        LOGFONTA lf = {};
+        if (GetObjectA(src, sizeof(lf), &lf) > 0)
+        {
+            lf.lfQuality = NONANTIALIASED_QUALITY;
+            s_noaa_font = CreateFontIndirectA(&lf);
+            s_noaa_h    = (gf && gf->font_hgt > 0) ? gf->font_hgt : abs(lf.lfHeight);
+        }
+        s_noaa_src = src;
+    }
+    return s_noaa_font ? s_noaa_font : src;
 }
 
-static int sp_font_h()
+int sp_font_h()
 {
+    sp_font();
+    if (s_noaa_h > 0) return s_noaa_h;
     RGE_Font* f = RGE_Base_Game__get_font(*base_game, SP_FONT_ID);
     return (f && f->font_hgt > 0) ? f->font_hgt : 12;
 }
@@ -113,9 +141,9 @@ static std::vector<SpectatorViewDef> s_views;
 static int s_active = 0;
 static unsigned int s_view_generation = 0;
 
-// Re-render every Nth need_redraw call; off-frames reuse the panel buffer.
-// Lower = smoother, higher = cheaper. Container ticks at display rate.
-static const int SP_REDRAW_EVERY_N = 15;
+// Wall-clock-gated throttle (need_redraw callback rate is unspecified).
+// 100 ms matches the main object UI update cadence.
+static const DWORD SP_REDRAW_MIN_MS = 100;
 
 extern void __stdcall handle_overlay_size();
 
@@ -157,26 +185,35 @@ static void draw_tab_bg(TDrawArea* da, int x, int w, int y, int h)
 static void draw_tab_text(HDC hdc, int x, int w, int y, int h)
 {
     if (s_views.empty() || !hdc) return;
-    RECT rtab = { x, y, x + w, y + h };
+    const char* label = s_views[s_active].label;
+    int len = (int)strlen(label);
+
     SetTextColor(hdc, RGB(255, 255, 255));
-    DrawTextA(hdc, s_views[s_active].label, -1, &rtab, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    SIZE sz;
+    GetTextExtentPoint32A(hdc, label, len, &sz);
+    int font_h = sp_font_h();
+    int tx = x + (w - sz.cx) / 2;
+    int ty = y + (h - font_h) / 2;
+    if (ty < y) ty = y;
+    RECT clip = { x, y, x + w, y + h };
+    ExtTextOutA(hdc, tx, ty, ETO_CLIPPED, &clip, label, len, NULL);
 }
 
 struct SpectatorUserData
 {
     bool had_content;
     unsigned int seen_view_generation;
-    int tick_counter;
+    DWORD last_draw_ms;
 };
 
 static void* sp_create(TRIBE_Panel_Screen_Overlay* /*panel*/, const void* /*user_init*/)
 {
-    // Palette may differ between games; flush cached indices.
-    s_pal_cache.clear();
+    s_pal_cache.clear();  // palette may differ between games
     SpectatorUserData* d = new SpectatorUserData;
     d->had_content = false;
     d->seen_view_generation = s_view_generation;
-    d->tick_counter = 0;
+    d->last_draw_ms = 0;
     return d;
 }
 
@@ -186,20 +223,20 @@ static bool sp_need_redraw(TRIBE_Panel_Screen_Overlay* /*panel*/, void* user_dat
 {
     if (!isRec() || s_views.empty()) return false;
     SpectatorUserData* d = (SpectatorUserData*)user_data;
-    // View switch bypasses the throttle so Alt+Q feels instant.
+    DWORD now = timeGetTime();
     if (d->seen_view_generation != s_view_generation)
     {
         d->seen_view_generation = s_view_generation;
         d->had_content = true;
-        d->tick_counter = 0;
+        d->last_draw_ms = now;
         return true;
     }
-    if (++d->tick_counter < SP_REDRAW_EVERY_N) return false;
-    d->tick_counter = 0;
+    if (now - d->last_draw_ms < SP_REDRAW_MIN_MS) return false;
 
     bool any   = s_views[s_active].need_redraw();
     bool needs = any || d->had_content;
     d->had_content = any;
+    if (needs) d->last_draw_ms = now;
     return needs;
 }
 
@@ -227,8 +264,6 @@ static void draw_player_stripe(TDrawArea* da, int col_x, int col_w, int cell_y, 
         pal_player(color_id));
 }
 
-// ExtTextOutA over DrawTextA: skips the DT_END_ELLIPSIS measurement pass.
-// Overflow is clipped by the rect instead of ellipsized.
 static void draw_player_name(HDC hdc, int col_x, int col_w, int cell_y, int font_h,
                               TRIBE_Player* player, int player_idx)
 {
@@ -252,8 +287,20 @@ static void draw_player_name(HDC hdc, int col_x, int col_w, int cell_y, int font
     int lh        = label_h();
     int text_y    = cell_y + (lh - font_h) / 2;
     if (text_y < cell_y) text_y = cell_y;
-    RECT clip = { col_x + 3, cell_y, col_x + content_w - 2, cell_y + lh };
-    ExtTextOutA(hdc, col_x + 3, text_y, ETO_CLIPPED, &clip, name, name_len, NULL);
+
+    SIZE sz;
+    GetTextExtentPoint32A(hdc, name, name_len, &sz);
+    int right_x = col_x + content_w - 4;
+    int text_x  = right_x - sz.cx;
+    int left_x  = col_x + 3;
+    if (text_x < left_x) text_x = left_x;
+
+    // Black backing fill + text in one call via ETO_OPAQUE.
+    RECT bg = { text_x - 2, cell_y, text_x + sz.cx + 2, cell_y + lh };
+    if (bg.left  < left_x)  bg.left  = left_x;
+    if (bg.right > right_x) bg.right = right_x;
+    SetBkColor(hdc, RGB(0, 0, 0));
+    ExtTextOutA(hdc, text_x, text_y, ETO_OPAQUE | ETO_CLIPPED, &bg, name, name_len, NULL);
 }
 
 static RECT sp_render_to_image_buffer(TRIBE_Panel_Screen_Overlay* /*panel*/, void* /*user_data*/,
@@ -271,7 +318,7 @@ static RECT sp_render_to_image_buffer(TRIBE_Panel_Screen_Overlay* /*panel*/, voi
     int tab_h     = current_tab_h();
     int lh        = label_h();
     int cell_h    = lh + view.compact_h;
-    int col_w     = min(panel_w, SP_MAX_COL_W);
+    int col_w     = sp_col_w(panel_w);
     int col_x     = panel_w - col_w;
     int cell_step = cell_h + SP_CELL_GAP;
     int content_x = col_x;
@@ -279,10 +326,13 @@ static RECT sp_render_to_image_buffer(TRIBE_Panel_Screen_Overlay* /*panel*/, voi
 
     if (view.begin_frame) view.begin_frame();
 
+    int tab_w = (col_w < SP_TAB_W) ? col_w : SP_TAB_W;
+    int tab_x = col_x + col_w - tab_w;
+
     if (TDrawArea__Lock(render_area, "sp_slp", 1))
     {
         TDrawArea__SetClipRect(render_area, NULL);
-        draw_tab_bg(render_area, col_x, col_w, 0, tab_h);
+        draw_tab_bg(render_area, tab_x, tab_w, 0, tab_h);
 
         for (int i = 1; i < pnum; i++)
         {
@@ -290,7 +340,7 @@ static RECT sp_render_to_image_buffer(TRIBE_Panel_Screen_Overlay* /*panel*/, voi
             if (!player) continue;
             int cell_y = tab_h + (i - 1) * cell_step;
 
-            // Stripe spans label + content; per-view content clip is set after.
+            // Stripe spans label + content rows; view content clip is set after.
             RECT full_cell = { col_x, cell_y, col_x + col_w, cell_y + cell_h };
             TDrawArea__SetClipRect(render_area, &full_cell);
             draw_player_stripe(render_area, col_x, col_w, cell_y, cell_h, player, i);
@@ -309,12 +359,12 @@ static RECT sp_render_to_image_buffer(TRIBE_Panel_Screen_Overlay* /*panel*/, voi
     if (TDrawArea__GetDc(render_area, "sp_gdi"))
     {
         HDC hdc = render_area->DrawDc;
-        // Views and headers must not change clip rgn or font in their renders.
+        // Views/headers must leave clip rgn and font alone — they're set once here.
         SetBkMode(hdc, TRANSPARENT);
         SelectClipRgn(hdc, clip_region);
         HGDIOBJ old_font = SelectObject(hdc, sp_font());
 
-        draw_tab_text(hdc, col_x, col_w, 0, tab_h);
+        draw_tab_text(hdc, tab_x, tab_w, 0, tab_h);
 
         int font_h = sp_font_h();
         for (int i = 1; i < pnum; i++)

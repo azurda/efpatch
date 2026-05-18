@@ -5,8 +5,8 @@
 enum SpectatorLayout { SP_FULL = 0, SP_COMPACT = 1 };
 
 // Container batches Lock/Unlock and GetDc/ReleaseDc across all cells, so
-// views must NOT acquire them and must do only SLP work on SP_PASS_SLP,
-// only GDI work (via da->DrawDc) on SP_PASS_GDI.
+// views must NOT acquire them; do only SLP work on SP_PASS_SLP, only GDI
+// work (via da->DrawDc) on SP_PASS_GDI.
 enum SpectatorPass { SP_PASS_SLP = 0, SP_PASS_GDI = 1 };
 
 struct SpectatorViewDef {
@@ -25,24 +25,13 @@ struct SpectatorViewDef {
     void (*begin_frame)();
 };
 
-// Register the spectator container panel.
-// Must be called once from DllMain, before any register_spectator_view() calls.
+// Call once from DllMain before any register_spectator_view().
 void register_spectator_overlay();
-
-// Register a content view.  Safe to call any time after register_spectator_overlay().
 void register_spectator_view(const SpectatorViewDef& def);
-
-// Advance to the next registered view; triggers a panel resize.
-// Wire this to whatever UI button / hotkey you add later.
 void spectator_next_view();
 
-// Player colour utilities shared by view modules.
-COLORREF get_player_color(int player_idx);  // player_idx 1-8 (0 = gaia/black)
-HBRUSH   get_player_brush(int player_idx);
-
-// Nearest-palette-index lookup for the active draw_system palette, cached.
+// Nearest-palette-index lookup against the active draw_system palette, cached.
 // Use for TDrawArea__FillRect calls inside the Lock pass.
 unsigned __int8 pal_index(COLORREF rgb);
 
-// Returns the cached palette index for a player colour id (0..8).
-unsigned __int8 pal_player(int color_id);
+int sp_font_h();

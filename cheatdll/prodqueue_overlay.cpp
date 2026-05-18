@@ -4,20 +4,41 @@
 #include "consts.h"
 #include "rec.h"
 
-static const int ICON_SIZE     = 36;
-static const int COUNT_H       = 14;
-static const int BAR_H         = 5;
-static const int CELL_W        = ICON_SIZE + 2;
-static const int MARGIN_R      = 8;
-static const int ROW_H         = ICON_SIZE + COUNT_H + BAR_H;
-static const int ROW_GAP       = 2;
-static const int TECH_ROW_Y    = ROW_H + ROW_GAP;
-static const int PANEL_H       = TECH_ROW_Y + ROW_H + 2;
+static const int ICON_SIZE   = 36;
+static const int COUNT_H     = 14;
+static const int BAR_H       = 5;
+static const int MARGIN_R    = 8;
+static const int ROW_H       = ICON_SIZE + COUNT_H + BAR_H;
+static const int ROW_GAP     = 2;
+static const int TECH_ROW_Y  = ROW_H + ROW_GAP;
+static const int PANEL_H     = TECH_ROW_Y + ROW_H + 2;
 
-static const int ICON_SIZE_C   = 24;
-static const int COUNT_H_C     = 10;
-static const int BAR_H_C       = 3;
-static const int ROW_H_COMPACT = ICON_SIZE_C + COUNT_H_C + BAR_H_C;
+// Compact (spectator) layout.
+static const int ICON_SIZE_C     = 24;
+static const int COUNT_H_C       = 14;
+static const int COUNT_H_C_LARGE = 18;       // cd.largeText path
+static const int BAR_H_C         = 4;
+// SLPs render at their native ~36 px from (cx, row_y) regardless of icon_size,
+// so the strip-below must sit at row_y + 36, not row_y + icon_size.
+static const int SLP_NATIVE_H    = 36;
+// Allocate the largeText height so the bar never clips on toggle.
+static const int ROW_H_COMPACT   = SLP_NATIVE_H + COUNT_H_C_LARGE + BAR_H_C;
+
+static HBRUSH s_br_bg       = NULL;
+static HBRUSH s_br_bar_bg   = NULL;
+static HBRUSH s_br_bar_fg   = NULL;
+static HBRUSH s_br_bar_tech = NULL;
+static HBRUSH s_br_icon     = NULL;
+
+static void ensure_brushes()
+{
+    if (s_br_bg) return;
+    s_br_bg       = CreateSolidBrush(RGB(  0,   0,   0));
+    s_br_bar_bg   = CreateSolidBrush(RGB( 40,  40,  40));
+    s_br_bar_fg   = CreateSolidBrush(RGB( 30, 200,  70));
+    s_br_bar_tech = CreateSolidBrush(RGB( 80, 150, 240));
+    s_br_icon     = CreateSolidBrush(RGB( 60,  60,  80));
+}
 
 static TShape* resolve_unit_slp(TRIBE_Player* player)
 {
@@ -76,7 +97,7 @@ bool collect_prodqueue_for_player(TRIBE_Player* player, std::vector<PQEntry>& en
             __int16 slot_prg = (training && j == 0 && rec.master_id == active_id)
                                ? active_prg : 0;
 
-            // Linear scan beats std::map here: N is small (<~20 distinct master_ids).
+            // Linear scan beats std::map: N is small (<~20 distinct master_ids).
             int idx = -1;
             for (int k = 0; k < (int)entries.size(); k++)
                 if (entries[k].master_id == rec.master_id) { idx = k; break; }
@@ -142,11 +163,13 @@ bool collect_techqueue(std::vector<TechEntry>& entries)
     return collect_techqueue_for_player((TRIBE_Player*)RGE_Base_Game__get_player(*base_game), entries);
 }
 
-// SLP sprites render at native ~36px regardless of icon_size; cell step
-// must clear 36+4 to prevent neighbouring cells bleeding into the sprite.
-static inline int pq_count_h(int icon_size) { return (icon_size <= 24) ? 10 : COUNT_H; }
-static inline int pq_bar_h  (int icon_size) { return (icon_size <= 24) ?  3 : BAR_H;   }
-static inline int pq_cell_step(int icon_size) { return max(icon_size, 36) + 4; }
+static inline int pq_count_h(int icon_size)
+{
+    return (icon_size <= 24) ? (cd.largeText ? COUNT_H_C_LARGE : COUNT_H_C) : COUNT_H;
+}
+static inline int pq_bar_h(int icon_size) { return (icon_size <= 24) ? BAR_H_C : BAR_H; }
+// Cell step ≥ native SLP width + 8 px gutter so icons don't bleed into neighbours.
+static inline int pq_cell_step(int icon_size) { return max(icon_size, 36) + 8; }
 
 void draw_prodqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
                                   const std::vector<PQEntry>& entries,
@@ -165,13 +188,19 @@ void draw_prodqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
                    ? max(cell_x, cell_x + cell_w - n * cell_w_i - MARGIN_R)
                    : cell_x;
 
+    int strip_w = max(icon_size, SLP_NATIVE_H);
+
     if (pass == SP_PASS_SLP)
     {
-        TShape* unit_slp = resolve_unit_slp(player);
-        unsigned __int8 pi_bg     = pal_index(RGB(  0,   0,   0));
+        // Palette idx 0 is true black on this surface; other colours go through
+        // nearest-match (close enough for bars that don't need text contrast).
+        const unsigned __int8 pi_black  = 0;
         unsigned __int8 pi_bar_bg = pal_index(RGB( 40,  40,  40));
-        unsigned __int8 pi_bar_fg = pal_index(RGB( 30, 160,  60));
+        unsigned __int8 pi_bar_fg = pal_index(RGB( 30, 200,  70));
         unsigned __int8 pi_icon   = pal_index(RGB( 60,  60,  80));
+        TShape* unit_slp = resolve_unit_slp(player);
+
+        int icon_h = max(icon_size, SLP_NATIVE_H);
 
         for (int i = 0; i < n; i++)
         {
@@ -179,15 +208,15 @@ void draw_prodqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
             int cx = origin_x + i * cell_w_i;
 
             if (!unit_slp)
-                TDrawArea__FillRect(da, cx, row_y, cx + icon_size, row_y + icon_size, pi_icon);
+                TDrawArea__FillRect(da, cx, row_y, cx + icon_size, row_y + icon_h, pi_icon);
 
-            int cy = row_y + icon_size;
-            TDrawArea__FillRect(da, cx, cy, cx + icon_size, cy + count_h_i, pi_bg);
+            int cy = row_y + icon_h;
+            TDrawArea__FillRect(da, cx, cy, cx + strip_w, cy + count_h_i, pi_black);
             int by = cy + count_h_i;
-            TDrawArea__FillRect(da, cx, by, cx + icon_size, by + bar_h_i, pi_bar_bg);
+            TDrawArea__FillRect(da, cx, by, cx + strip_w, by + bar_h_i, pi_bar_bg);
             if (e.max_progress > 0 && e.max_progress <= 100)
             {
-                int fw = (icon_size * e.max_progress) / 100;
+                int fw = (strip_w * e.max_progress) / 100;
                 if (fw > 0) TDrawArea__FillRect(da, cx, by, cx + fw, by + bar_h_i, pi_bar_fg);
             }
 
@@ -205,16 +234,25 @@ void draw_prodqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
 
     HDC hdc = da->DrawDc;
     if (!hdc) return;
-    SetTextColor(hdc, RGB(255, 220, 50));
+    SetTextColor(hdc, RGB(255, 230, 80));
+    int icon_h = max(icon_size, SLP_NATIVE_H);
+    int font_h = sp_font_h();
+
     for (int i = 0; i < n; i++)
     {
         const PQEntry& e = entries[i];
         int cx = origin_x + i * cell_w_i;
-        int cy = row_y + icon_size;
-        RECT rcount = { cx, cy, cx + icon_size, cy + count_h_i };
+        int cy = row_y + icon_h;
         char buf[12];
-        snprintf(buf, sizeof(buf), "x%d", e.total_count);
-        DrawTextA(hdc, buf, -1, &rcount, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        int  len = snprintf(buf, sizeof(buf), "%d", e.total_count);
+
+        SIZE sz;
+        GetTextExtentPoint32A(hdc, buf, len, &sz);
+        int tx = cx + (strip_w - sz.cx) / 2;
+        int ty = cy + (count_h_i - font_h) / 2;
+        if (ty < cy) ty = cy;
+        RECT clip = { cx, cy, cx + strip_w, cy + count_h_i };
+        ExtTextOutA(hdc, tx, ty, ETO_CLIPPED, &clip, buf, len, NULL);
     }
 }
 
@@ -235,13 +273,17 @@ void draw_techqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
                    ? max(cell_x, cell_x + cell_w - n * cell_w_i - MARGIN_R)
                    : cell_x;
 
+    int strip_w = max(icon_size, SLP_NATIVE_H);
+
     if (pass == SP_PASS_SLP)
     {
-        TShape* tech_slp = resolve_tech_slp(player);
-        unsigned __int8 pi_bg     = pal_index(RGB(  0,   0,   0));
+        const unsigned __int8 pi_black  = 0;
         unsigned __int8 pi_bar_bg = pal_index(RGB( 40,  40,  40));
-        unsigned __int8 pi_bar_fg = pal_index(RGB( 60, 120, 220));
+        unsigned __int8 pi_bar_fg = pal_index(RGB( 80, 150, 240));
         unsigned __int8 pi_icon   = pal_index(RGB( 60,  60,  80));
+        TShape* tech_slp = resolve_tech_slp(player);
+
+        int icon_h = max(icon_size, SLP_NATIVE_H);
 
         for (int i = 0; i < n; i++)
         {
@@ -249,15 +291,15 @@ void draw_techqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
             int cx = origin_x + i * cell_w_i;
 
             if (!tech_slp)
-                TDrawArea__FillRect(da, cx, row_y, cx + icon_size, row_y + icon_size, pi_icon);
+                TDrawArea__FillRect(da, cx, row_y, cx + icon_size, row_y + icon_h, pi_icon);
 
-            int ly = row_y + icon_size;
-            TDrawArea__FillRect(da, cx, ly, cx + icon_size, ly + count_h_i, pi_bg);
+            int ly = row_y + icon_h;
+            TDrawArea__FillRect(da, cx, ly, cx + strip_w, ly + count_h_i, pi_black);
             int by = ly + count_h_i;
-            TDrawArea__FillRect(da, cx, by, cx + icon_size, by + bar_h_i, pi_bar_bg);
+            TDrawArea__FillRect(da, cx, by, cx + strip_w, by + bar_h_i, pi_bar_bg);
             if (e.progress > 0)
             {
-                int fw = (icon_size * e.progress) / 100;
+                int fw = (strip_w * e.progress) / 100;
                 if (fw > 0) TDrawArea__FillRect(da, cx, by, cx + fw, by + bar_h_i, pi_bar_fg);
             }
 
@@ -273,20 +315,31 @@ void draw_techqueue_overlay_pass(TDrawArea* da, int cell_x, int cell_w,
 
     HDC hdc = da->DrawDc;
     if (!hdc) return;
-    SetTextColor(hdc, RGB(140, 200, 255));
+    SetTextColor(hdc, RGB(160, 210, 255));
+    int icon_h = max(icon_size, SLP_NATIVE_H);
+    int font_h = sp_font_h();
+
     for (int i = 0; i < n; i++)
     {
         const TechEntry& e = entries[i];
         int cx = origin_x + i * cell_w_i;
-        int ly = row_y + icon_size;
-        RECT rl = { cx, ly, cx + icon_size, ly + count_h_i };
+        int ly = row_y + icon_h;
         char buf[8];
-        snprintf(buf, sizeof(buf), "%d%%", (int)e.progress);
-        DrawTextA(hdc, buf, -1, &rl, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        // "100%" doesn't fit; the only 3-digit % value is 100, so drop the %.
+        int  len = snprintf(buf, sizeof(buf), (e.progress >= 100) ? "%d" : "%d%%", (int)e.progress);
+
+        SIZE sz;
+        GetTextExtentPoint32A(hdc, buf, len, &sz);
+        int tx = cx + (strip_w - sz.cx) / 2;
+        int ty = ly + (count_h_i - font_h) / 2;
+        if (ty < ly) ty = ly;
+        RECT clip = { cx, ly, cx + strip_w, ly + count_h_i };
+        ExtTextOutA(hdc, tx, ty, ETO_CLIPPED, &clip, buf, len, NULL);
     }
 }
 
-// Single-cell wrappers for the live overlay; spectator path calls _pass directly.
+// Single-cell wrappers for the live overlay (one cell, one player). Spectator
+// path calls draw_*_pass directly inside its batched Lock/GetDc passes.
 void draw_prodqueue_overlay(TDrawArea* da, int cell_x, int cell_w,
                              const std::vector<PQEntry>& entries,
                              HRGN clip_region, TRIBE_Player* player, int row_y,
@@ -297,7 +350,7 @@ void draw_prodqueue_overlay(TDrawArea* da, int cell_x, int cell_w,
     int count_h_i = pq_count_h(icon_size);
     int bar_h_i   = pq_bar_h(icon_size);
 
-    RECT clip_rect = { cell_x, row_y, cell_x + cell_w, row_y + icon_size + count_h_i + bar_h_i };
+    RECT clip_rect = { cell_x, row_y, cell_x + cell_w, row_y + max(icon_size, SLP_NATIVE_H) + count_h_i + bar_h_i };
     TDrawArea__SetClipRect(da, &clip_rect);
 
     if (TDrawArea__Lock(da, "pq_unit", 1))
@@ -334,7 +387,7 @@ void draw_techqueue_overlay(TDrawArea* da, int cell_x, int cell_w,
     int count_h_i = pq_count_h(icon_size);
     int bar_h_i   = pq_bar_h(icon_size);
 
-    RECT clip_rect = { cell_x, row_y, cell_x + cell_w, row_y + icon_size + count_h_i + bar_h_i };
+    RECT clip_rect = { cell_x, row_y, cell_x + cell_w, row_y + max(icon_size, SLP_NATIVE_H) + count_h_i + bar_h_i };
     TDrawArea__SetClipRect(da, &clip_rect);
 
     if (TDrawArea__Lock(da, "pq_tech", 1))
@@ -361,9 +414,7 @@ void draw_techqueue_overlay(TDrawArea* da, int cell_x, int cell_w,
     TDrawArea__SetClipRect(da, NULL);
 }
 
-// ===========================================================================
-// Live overlay — shows the local player's queue during non-spectator games.
-// ===========================================================================
+// Live overlay: local player's queue, non-spectator games only.
 
 struct PQUserData { bool had_queue; };
 
@@ -427,22 +478,10 @@ static RECT pq_render_to_image_buffer(TRIBE_Panel_Screen_Overlay* panel, void* u
     return *render_rect;
 }
 
-static void pq_handle_hotkey(TRIBE_Panel_Screen_Overlay* panel, void* user_data, int hotkey)
+static void pq_handle_hotkey(TRIBE_Panel_Screen_Overlay* panel, void* /*user_data*/, int hotkey)
 {
-    switch (hotkey)
-    {
-    case 0x63:
-        if (panel->active)
-            panel->vfptr->set_active((TPanel*)panel, 0);
-        else
-            panel->vfptr->set_active((TPanel*)panel, 1);
-
-        break;
-    case 0x64:
-        break;
-    default:
-        break;
-    }
+    if (hotkey == 0x63)  // F8: toggle live overlay
+        panel->vfptr->set_active((TPanel*)panel, panel->active ? 0 : 1);
 }
 
 void register_prodqueue_overlay()
@@ -457,11 +496,8 @@ void register_prodqueue_overlay()
     register_screen_overlay(cb, NULL);
 }
 
-// ===========================================================================
-// Queue spectator view — registered into the spectator container.
-// Container draws the player grid, name header, and colour stripe; this
-// view fills the per-player content area with the unit + tech rows.
-// ===========================================================================
+// Queue spectator view: container handles player grid + name + stripe; this
+// view fills the per-player content area with the unit and tech rows.
 
 static bool queue_need_redraw()
 {

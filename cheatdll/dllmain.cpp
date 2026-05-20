@@ -146,6 +146,7 @@
 #include "tabstop.h"
 #include "mousewheel.h"
 #include "utf8.h"
+#include "databank.h"
 #ifdef TARGET_VOOBLY
 #include "legacypatch.h"
 #include "iuserpatch.h"
@@ -409,6 +410,7 @@ void setHooksEF()
     setAdvCheatHooks();
 
     setLangDllHooks();
+    setDatabankHooks();
 
     setExtraTerrainHooks();
 
